@@ -1,15 +1,21 @@
 package sample.cluster
 
-import akka.actor.{Props, ActorSystem}
+import java.util.concurrent.TimeUnit
+
+import akka.actor.{ActorSystem, AddressFromURIString}
 import com.typesafe.config.ConfigFactory
 
 /**
  * @author Anton Gnutov
  */
 object Main extends App {
-  val system = ActorSystem("system")
+  val system = ActorSystem("sample")
+  val config = ConfigFactory.load()
 
-  system.actorOf(Props[ClusterManagerActor], "ClusterManager")
+  val seedNode = AddressFromURIString(config.getString("sample.seed-node"))
+  val unreachableTimeout = config.getDuration("sample.unreachable.timeout", TimeUnit.SECONDS)
+
+  system.actorOf(ClusterManagerActor.props(seedNode, unreachableTimeout), "ClusterManager")
 
   sys.addShutdownHook {
     system.terminate()
