@@ -6,7 +6,6 @@ import akka.cluster.ClusterEvent._
 import akka.event.LoggingReceive
 import sample.cluster.ClusterManagerActor.{JoinCluster, UnreachableTimeout}
 
-import scala.collection.mutable
 import scala.concurrent.duration._
 
 /**
@@ -15,8 +14,6 @@ import scala.concurrent.duration._
 class ClusterManagerActor(seedNode: Address, unreachableTimeout: Long) extends Actor with ActorLogging {
 
   val cluster = Cluster(context.system)
-
-  private val unreachable: mutable.Map[Address, Cancellable] = mutable.Map()
 
   import context.dispatcher
   val joinTimer = context.system.scheduler.schedule(1.second, 5.seconds, self, JoinCluster)
@@ -30,41 +27,51 @@ class ClusterManagerActor(seedNode: Address, unreachableTimeout: Long) extends A
   override def postStop(): Unit = {
     joinTimer.cancel()
     cluster.unsubscribe(self)
-    cluster.leave(cluster.selfAddress)
+    cluster.down(cluster.selfAddress)
   }
 
   override def receive = LoggingReceive {
     case JoinCluster =>
-      log.info("Trying to join the cluster ...")
+      log.debug("Trying to join the cluster ...")
       cluster.join(seedNode)
 
-    case UnreachableTimeout(address) =>
-      log.info(s"Unreachable timeout received: $address")
-      cluster.state.members.find(_.address == address).foreach { m =>
-        log.info(s"Removing node '$address' from cluster ...")
-        cluster.down(address)
-      }
-
     case MemberUp(member) =>
-      log.info(s"Node is up: $member")
-      joinTimer.cancel()
-      cancelUnreachableTimer(member.address)
-
-    case UnreachableMember(member) =>
-      log.info(s"Node is unreachable: $member")
-      val cancellable = context.system.scheduler.scheduleOnce(unreachableTimeout.seconds, self, UnreachableTimeout(member.address))
-      unreachable += (member.address -> cancellable)
-
-    case ReachableMember(member) =>
-      log.info(s"Node is reachable again: $member")
-      cancelUnreachableTimer(member.address)
-
-    case MemberRemoved(member, prevStatus) => log.info(s"Node is removed: $member after $prevStatus")
-    case ev: MemberEvent => log.info(s"[Event: $ev")
+      log.debug(s"Node is up: $member")
+      if (member.address == cluster.selfAddress) {
+        log.info("Joined the cluster")
+        joinTimer.cancel()
+        context.become(active(Map()))
+      }
   }
 
-  private def cancelUnreachableTimer(address: Address): Unit = {
-    unreachable.remove(address).foreach(_.cancel())
+  def active(unreachable: Map[Address, Cancellable]): Receive = LoggingReceive {
+    case UnreachableTimeout(address) =>
+      log.debug(s"Unreachable timeout received: $address")
+      cluster.state.members.find(_.address == address).foreach { m =>
+
+        if (address == seedNode) {
+          log.info(s"seedNode is unreachable: restarting ...")
+          context.stop(self)
+        } else {
+          log.info(s"Removing node [$address] from cluster ...")
+          cluster.down(address)
+        }
+      }
+
+    case UnreachableMember(member) =>
+      log.debug(s"Node is unreachable: $member")
+      val cancellable =
+        context.system.scheduler.scheduleOnce(unreachableTimeout.seconds, self, UnreachableTimeout(member.address))
+      context.become(active(unreachable + (member.address -> cancellable)))
+
+    case ReachableMember(member) =>
+      log.debug(s"Node is reachable again: $member")
+      unreachable.get(member.address).foreach(_.cancel())
+      context.become(active(unreachable - member.address))
+
+    case MemberUp(member) => log.debug(s"Node is up: $member")
+    case MemberRemoved(member, prevStatus) => log.debug(s"Node is removed: $member after $prevStatus")
+    case ev: MemberEvent => log.debug(s"[Event: $ev")
   }
 }
 
